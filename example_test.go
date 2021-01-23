@@ -16,6 +16,7 @@ func Example() {
 				return nil, err
 			}
 			ips, err := r.LookupHost(ctx, host)
+			// ips, err := net.DefaultResolver.LookupHost(ctx, host)
 			if err != nil {
 				return nil, err
 			}
@@ -33,6 +34,8 @@ func Example() {
 	res, err := c.Get("http://httpbin.org/status/418")
 	if err == nil {
 		fmt.Println(res.StatusCode)
+	} else {
+		fmt.Println(err)
 	}
 	// Output: 418
 }

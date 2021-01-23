@@ -181,10 +181,10 @@ func (r *Resolver) lookupFunc(key string) func() (interface{}, error) {
 
 func (r *Resolver) getCtx() (ctx context.Context, cancel context.CancelFunc) {
 	timeout := DefaultTimeout
-	if r.Timeout <= 0 {
+	if r.Timeout > 0 {
 		timeout = r.Timeout
 	}
-	return context.WithTimeout(ctx, timeout)
+	return context.WithTimeout(context.Background(), timeout)
 }
 
 func (r *Resolver) load(key string) (rrs []string, err error, found bool) {

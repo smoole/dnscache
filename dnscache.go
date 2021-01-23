@@ -9,6 +9,11 @@ import (
 	"golang.org/x/sync/singleflight"
 )
 
+const (
+	DefaultTimeout      = 120 * time.Second
+	DefaultFailCacheTTL = 1 * time.Second
+)
+
 type DNSResolver interface {
 	LookupHost(ctx context.Context, host string) (addrs []string, err error)
 	LookupAddr(ctx context.Context, addr string) (names []string, err error)
@@ -17,6 +22,9 @@ type DNSResolver interface {
 type Resolver struct {
 	// Timeout defines the maximum allowed time allowed for a lookup.
 	Timeout time.Duration
+
+	// the maximum ttl for fail cache
+	FailCacheTTL time.Duration
 
 	// Resolver is used to perform actual DNS lookup. If nil,
 	// net.DefaultResolver is used instead.
@@ -32,9 +40,10 @@ type Resolver struct {
 }
 
 type cacheEntry struct {
-	rrs  []string
-	err  error
-	used bool
+	rrs       []string
+	err       error
+	used      bool
+	updatedAt time.Time
 }
 
 // LookupAddr performs a reverse lookup for the given address, returning a list
@@ -54,7 +63,7 @@ func (r *Resolver) LookupHost(ctx context.Context, host string) (addrs []string,
 // Refresh refreshes cached entries which has been used at least once since the
 // last Refresh. If clearUnused is true, entries which hasn't be used since the
 // last Refresh are removed from the cache.
-func (r *Resolver) Refresh(clearUnused bool) {
+func (r *Resolver) Refresh(clearUnused bool, persistOnFailure bool) {
 	r.once.Do(r.init)
 	r.mu.RLock()
 	update := make([]string, 0, len(r.cache))
@@ -77,7 +86,7 @@ func (r *Resolver) Refresh(clearUnused bool) {
 	}
 
 	for _, key := range update {
-		r.update(context.Background(), key, false)
+		r.update(context.Background(), key, false, persistOnFailure)
 	}
 }
 
@@ -96,12 +105,12 @@ func (r *Resolver) lookup(ctx context.Context, key string) (rrs []string, err er
 		if r.OnCacheMiss != nil {
 			r.OnCacheMiss()
 		}
-		rrs, err = r.update(ctx, key, true)
+		rrs, err = r.update(ctx, key, true, false)
 	}
 	return
 }
 
-func (r *Resolver) update(ctx context.Context, key string, used bool) (rrs []string, err error) {
+func (r *Resolver) update(ctx context.Context, key string, used bool, persistOnFailure bool) (rrs []string, err error) {
 	c := lookupGroup.DoChan(key, r.lookupFunc(key))
 	select {
 	case <-ctx.Done():
@@ -125,6 +134,13 @@ func (r *Resolver) update(ctx context.Context, key string, used bool) (rrs []str
 		err = res.Err
 		if err == nil {
 			rrs, _ = res.Val.([]string)
+		}
+		if err != nil && persistOnFailure {
+			var found bool
+			rrs, err, found = r.load(key)
+			if found {
+				return
+			}
 		}
 		r.mu.Lock()
 		r.storeLocked(key, rrs, used, err)
@@ -164,13 +180,11 @@ func (r *Resolver) lookupFunc(key string) func() (interface{}, error) {
 }
 
 func (r *Resolver) getCtx() (ctx context.Context, cancel context.CancelFunc) {
-	ctx = context.Background()
-	if r.Timeout > 0 {
-		ctx, cancel = context.WithTimeout(ctx, r.Timeout)
-	} else {
-		cancel = func() {}
+	timeout := DefaultTimeout
+	if r.Timeout <= 0 {
+		timeout = r.Timeout
 	}
-	return
+	return context.WithTimeout(ctx, timeout)
 }
 
 func (r *Resolver) load(key string) (rrs []string, err error, found bool) {
@@ -184,7 +198,19 @@ func (r *Resolver) load(key string) (rrs []string, err error, found bool) {
 	rrs = entry.rrs
 	err = entry.err
 	used := entry.used
+	updatedAt := entry.updatedAt
 	r.mu.RUnlock()
+
+	if err != nil {
+		cacheTTL := DefaultFailCacheTTL
+		if r.FailCacheTTL > 0 {
+			cacheTTL = r.FailCacheTTL
+		}
+		if time.Now().Sub(updatedAt) > cacheTTL {
+			return []string{}, nil, false
+		}
+	}
+
 	if !used {
 		r.mu.Lock()
 		entry.used = true
@@ -199,11 +225,13 @@ func (r *Resolver) storeLocked(key string, rrs []string, used bool, err error) {
 		entry.rrs = rrs
 		entry.err = err
 		entry.used = used
+		entry.updatedAt = time.Now()
 		return
 	}
 	r.cache[key] = &cacheEntry{
-		rrs:  rrs,
-		err:  err,
-		used: used,
+		rrs:       rrs,
+		err:       err,
+		used:      used,
+		updatedAt: time.Now(),
 	}
 }

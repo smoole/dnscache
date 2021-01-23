@@ -44,11 +44,11 @@ func TestClearCache(t *testing.T) {
 	if e := r.cache["hgoogle.com"]; e != nil && !e.used {
 		t.Error("cache entry used flag is false, want true")
 	}
-	r.Refresh(true)
+	r.Refresh(true, false)
 	if e := r.cache["hgoogle.com"]; e != nil && e.used {
 		t.Error("cache entry used flag is true, want false")
 	}
-	r.Refresh(true)
+	r.Refresh(true, false)
 	if e := r.cache["hgoogle.com"]; e != nil {
 		t.Error("cache entry is not cleared")
 	}
@@ -77,7 +77,7 @@ func TestRaceOnDelete(t *testing.T) {
 			case <-rs:
 				return
 			default:
-				r.Refresh(true)
+				r.Refresh(true, false)
 				time.Sleep(time.Millisecond)
 			}
 		}
